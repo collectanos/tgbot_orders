@@ -31,6 +31,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
+os.system("pip install aiosqlite")
 
 # === FSM ===
 class CreateOrder(StatesGroup):
