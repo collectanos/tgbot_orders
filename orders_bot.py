@@ -2,6 +2,7 @@ import asyncio
 import time
 import logging
 import os
+import sys
 from typing import Optional
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -13,8 +14,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramAPIError
 from dotenv import load_dotenv
-import aiosqlite
-from datetime import datetime
+
+# === АВТОУСТАНОВКА aiosqlite (как вы просили) ===
+try:
+    import aiosqlite
+except ImportError:
+    print("Устанавливаем aiosqlite...")
+    os.system(f"{sys.executable} -m pip install aiosqlite")
+    import aiosqlite
 
 # === Настройка ===
 load_dotenv()
@@ -31,7 +38,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
-os.system("pip install aiosqlite")
 
 # === FSM ===
 class CreateOrder(StatesGroup):
@@ -41,6 +47,15 @@ class CreateOrder(StatesGroup):
     waiting_for_price = State()
     waiting_for_payment_method = State()
     waiting_for_payment_confirmation = State()
+
+class AdminFSM(StatesGroup):
+    broadcast_text = State()
+    discount_type = State()
+    discount_value = State()
+    promo_code = State()
+    promo_type = State()
+    promo_value = State()
+    promo_uses = State()
 
 # === База данных ===
 async def init_db():
@@ -93,7 +108,7 @@ async def init_db():
         """)
         await db.commit()
 
-# --- Функции для скидок и промокодов ---
+# --- Скидки и промокоды ---
 async def get_global_discount():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT discount_value, discount_type FROM global_discount WHERE id = 1") as cursor:
@@ -174,7 +189,7 @@ async def reset_promo_attempts(user_id: int):
         await db.execute("DELETE FROM user_promo_attempts WHERE user_id = ?", (user_id,))
         await db.commit()
 
-# --- Стандартные функции ---
+# --- Основные функции ---
 async def get_last_order_time(user_id: int) -> Optional[float]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -344,7 +359,7 @@ async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Создание заказа отменено.")
 
-# === Новый заказ ===
+# === Создание заказа ===
 @router.message(Command("neworder"))
 async def new_order_start(message: Message, state: FSMContext):
     if message.from_user.id == ADMIN_USER_ID:
@@ -540,15 +555,6 @@ async def admin_stats(message: Message):
     await message.answer(f"💼 Ваш заработок: {total:.2f} ₽")
 
 # === Рассылка ===
-class AdminFSM(StatesGroup):
-    broadcast_text = State()
-    discount_type = State()
-    discount_value = State()
-    promo_code = State()
-    promo_type = State()
-    promo_value = State()
-    promo_uses = State()
-
 @router.message(Command("broadcast"))
 async def broadcast_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_USER_ID:
@@ -744,7 +750,7 @@ async def user_apply_promo(message: Message):
     disc = f"{promo['discount_value']}%" if promo['discount_type'] == 'percent' else f"{promo['discount_value']} ₽"
     await message.answer(f"✅ Промокод `{code}` применён! Скидка: {disc}.", parse_mode="Markdown")
 
-# === Админ-обработчики заказов (без изменений) ===
+# === Админ: заказы (без изменений) ===
 @router.callback_query(F.data.startswith("take_"))
 async def admin_take(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_USER_ID: return
@@ -930,7 +936,7 @@ async def admin_del(callback: CallbackQuery):
 # === Запуск ===
 async def main():
     await init_db()
-    logger.info("Бот запущен с системой оплаты, скидок и промокодов.")
+    logger.info("Бот запущен с оплатой, скидками, промокодами и рассылкой.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
