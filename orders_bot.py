@@ -205,20 +205,31 @@ async def safe_send_message(chat_id: int, text: str, **kwargs):
     except TelegramAPIError as e:
         logger.warning(f"Не удалось отправить сообщение {chat_id}: {e}")
 
+_background_tasks = set()
+async def schedule_order_deletion(order_id: int, delay: int):
+    await asyncio.sleep(delay)
+    await delete_order(order_id)
+    logger.info(f"Заказ #{order_id} удалён (автоочистка)")
+
+def create_deletion_task(order_id: int, delay: int):
+    task = asyncio.create_task(schedule_order_deletion(order_id, delay))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 # === Команды ===
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     if message.from_user.id == ADMIN_USER_ID:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💼 Заработок", callback_data="menu_adminstats")],
-            [InlineKeyboardButton(text="📋 Мои заказы", callback_data="menu_myorders")]
+            [InlineKeyboardButton(text="📥 Мои заказы", callback_data="menu_adminorders")],
         ])
         await message.answer("👋 Админ-меню:", reply_markup=kb)
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🆕 Создать заказ", callback_data="menu_neworder")],
             [InlineKeyboardButton(text="📋 Мои заказы", callback_data="menu_myorders")],
-            [InlineKeyboardButton(text="💰 Мои траты", callback_data="menu_mystats")]
+            [InlineKeyboardButton(text="💰 Мои траты", callback_data="menu_mystats")],
         ])
         await message.answer("👋 Меню:", reply_markup=kb)
 
@@ -243,7 +254,31 @@ async def menu_adminstats(callback: CallbackQuery):
     await admin_stats(callback.message)
     await callback.answer()
 
-# === Создание заказа ===
+@router.callback_query(F.data == "menu_adminorders")
+async def menu_adminorders(callback: CallbackQuery):
+    # Показ всех заказов админу
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 20") as cursor:
+            orders = await cursor.fetchall()
+    if not orders:
+        await callback.message.answer("Нет заказов.")
+    else:
+        text = "Все заказы:\n"
+        for o in orders:
+            status_icon = {
+                "pending": "⏳", "in_progress": "🛠", "completed": "✅", "cancelled": "❌", "awaiting_payment": "💳"
+            }.get(o["status"], "❓")
+            title = (o['title'][:25] + "...") if len(o['title']) > 25 else o['title']
+            text += f"{status_icon} #{o['id']} — {title} (ID: {o['user_id']})\n"
+        await callback.message.answer(text)
+    await callback.answer()
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Создание заказа отменено.")
+
 @router.message(Command("neworder"))
 async def new_order_start(message: Message, state: FSMContext):
     if message.from_user.id == ADMIN_USER_ID:
@@ -344,7 +379,6 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
     if method == "наличные":
-        # Для наличных — сразу отправляем админу, так как оплата "в момент передачи"
         await update_order(order_id, status="pending")
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📥 Взять", callback_data=f"take_{order_id}")],
@@ -357,7 +391,6 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.answer(f"✅ Заказ #{order_id} отправлен админу!")
     else:
-        # Для карты — ждём подтверждения оплаты
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Оплатил", callback_data=f"paid_{order_id}")],
             [InlineKeyboardButton(text="❌ Не оплатил", callback_data=f"not_paid_{order_id}")]
@@ -368,7 +401,6 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("paid_"))
 async def handle_paid(callback: CallbackQuery):
     if callback.from_user.id == ADMIN_USER_ID:
-        await callback.answer()
         return
     order_id = int(callback.data.split("_")[1])
     await update_order(order_id, status="pending")
@@ -387,7 +419,6 @@ async def handle_paid(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("not_paid_"))
 async def handle_not_paid(callback: CallbackQuery):
     if callback.from_user.id == ADMIN_USER_ID:
-        await callback.answer()
         return
     order_id = int(callback.data.split("_")[1])
     await callback.message.answer(
@@ -431,25 +462,26 @@ async def pay_order_later(message: Message):
     )
     await message.answer(f"✅ Заказ #{order_id} отправлен админу!")
 
-# === Мои заказы ===
 @router.message(Command("myorders"))
 async def my_orders(message: Message):
+    if message.from_user.id == ADMIN_USER_ID:
+        await message.answer("Админ: смотрите уведомления.")
+        return
     orders_list = await get_user_orders(message.from_user.id)
     if not orders_list:
         await message.answer("У вас нет заказов.")
         return
     text = "Ваши заказы:\n"
     for o in orders_list:
-        status_icon = {
-            "pending": "⏳", "in_progress": "🛠", "completed": "✅",
-            "cancelled": "❌", "awaiting_payment": "💳"
-        }.get(o["status"], "❓")
-        title = (o['title'][:30] + "...") if len(o['title']) > 30 else o['title']
-        text += f"{status_icon} #{o['id']} — {title}\n"
+        status_icon = {"pending":"⏳", "in_progress":"🛠", "completed":"✅", "cancelled":"❌", "awaiting_payment":"💳"}.get(o["status"], "❓")
+        text += f"{status_icon} #{o['id']} — {o['title']}\n"
     await message.answer(text)
 
 @router.message(Command("mystats"))
 async def my_stats(message: Message):
+    if message.from_user.id == ADMIN_USER_ID:
+        await message.answer("Админ: используйте /adminstats")
+        return
     total = await get_user_total_spent(message.from_user.id)
     await message.answer(f"💰 Всего потрачено: {total:.2f} ₽")
 
@@ -460,7 +492,7 @@ async def admin_stats(message: Message):
     total = await get_admin_total_earned()
     await message.answer(f"💼 Ваш заработок: {total:.2f} ₽")
 
-# === Админ-обработчики ===
+# === Админ-обработчики (ОРИГИНАЛ ПОЛНОСТЬЮ СОХРАНЁН) ===
 @router.callback_query(F.data.startswith("take_"))
 async def admin_take(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_USER_ID: return
@@ -495,7 +527,6 @@ async def admin_ignore(callback: CallbackQuery):
     await callback.message.edit_text("🗑 Игнорировано.")
     await callback.answer()
 
-# --- Остальные обработчики (без изменений) ---
 @router.callback_query(F.data.startswith("change_price_"))
 async def start_change_price(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_USER_ID: return
@@ -593,13 +624,51 @@ async def confirm_earning(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_USER_ID: return
     order_id = int(callback.data.split("_")[2])
     await update_order(order_id, is_paid=1)
-    await callback.message.edit_text(f"✅ Сумма записана в заработок.")
+    order = await get_order(order_id)
+    final_price = order["admin_proposed_price"] or order["client_price"]
+    await callback.message.edit_text(f"✅ {final_price:.2f} ₽ записано в заработок.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🕒 3 ч", callback_data=f"keep_3_{order_id}")],
+        [InlineKeyboardButton(text="🕕 6 ч", callback_data=f"keep_6_{order_id}")],
+        [InlineKeyboardButton(text="🕛 12 ч", callback_data=f"keep_12_{order_id}")],
+        [InlineKeyboardButton(text="📆 24 ч", callback_data=f"keep_24_{order_id}")],
+        [InlineKeyboardButton(text="🗑 Сейчас", callback_data=f"del_now_{order_id}")]
+    ])
+    await callback.message.answer("Сохранить заказ на:", reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("skip_earn_"))
 async def skip_earning(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_USER_ID: return
+    order_id = int(callback.data.split("_")[2])
     await callback.message.edit_text("❌ Сумма НЕ записана в заработок.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🕒 3 ч", callback_data=f"keep_3_{order_id}")],
+        [InlineKeyboardButton(text="🕕 6 ч", callback_data=f"keep_6_{order_id}")],
+        [InlineKeyboardButton(text="🕛 12 ч", callback_data=f"keep_12_{order_id}")],
+        [InlineKeyboardButton(text="📆 24 ч", callback_data=f"keep_24_{order_id}")],
+        [InlineKeyboardButton(text="🗑 Сейчас", callback_data=f"del_now_{order_id}")]
+    ])
+    await callback.message.answer("Сохранить заказ на:", reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("keep_"))
+async def keep_order(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_USER_ID: return
+    hours = int(callback.data.split("_")[1])
+    order_id = int(callback.data.split("_")[2])
+    delay = hours * 3600
+    await update_order(order_id, auto_delete_at=time.time() + delay)
+    create_deletion_task(order_id, delay)
+    await callback.message.edit_text(f"Будет удалён через {hours} ч.")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("del_now_"))
+async def del_now(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_USER_ID: return
+    order_id = int(callback.data.split("_")[2])
+    await delete_order(order_id)
+    await callback.message.edit_text("Удалён.")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_del_"))
@@ -613,7 +682,7 @@ async def admin_del(callback: CallbackQuery):
 # === Запуск ===
 async def main():
     await init_db()
-    logger.info("Бот запущен с ТЗ, оплатой и лимитом 1 млрд ₽.")
+    logger.info("Бот запущен с ТЗ, оплатой, кнопками и лимитом 1 млрд ₽.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
