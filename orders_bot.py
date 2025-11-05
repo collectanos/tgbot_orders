@@ -34,13 +34,12 @@ dp.include_router(router)
 # === FSM ===
 class CreateOrder(StatesGroup):
     waiting_for_title = State()
-    waiting_for_tz_choice = State()        # Новое
-    waiting_for_tz = State()               # Новое
+    waiting_for_tz_choice = State()
+    waiting_for_tz = State()
     waiting_for_description = State()
     waiting_for_tags = State()
     waiting_for_price = State()
     waiting_for_payment_method = State()
-    waiting_for_payment_confirmation = State()
 
 # === База данных ===
 async def init_db():
@@ -206,17 +205,6 @@ async def safe_send_message(chat_id: int, text: str, **kwargs):
     except TelegramAPIError as e:
         logger.warning(f"Не удалось отправить сообщение {chat_id}: {e}")
 
-_background_tasks = set()
-async def schedule_order_deletion(order_id: int, delay: int):
-    await asyncio.sleep(delay)
-    await delete_order(order_id)
-    logger.info(f"Заказ #{order_id} удалён (автоочистка)")
-
-def create_deletion_task(order_id: int, delay: int):
-    task = asyncio.create_task(schedule_order_deletion(order_id, delay))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
 # === Команды ===
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -342,39 +330,7 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
             "💳 Оплатите по СБП на банк ВТБ:\n+7 953 850-72-79"
         )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Оплатил", callback_data="confirm_payment_yes")],
-        [InlineKeyboardButton(text="❌ Не оплатил", callback_data="confirm_payment_no")]
-    ])
-    await callback.message.answer("Оплатили?", reply_markup=kb)
-    await callback.answer()
-
-@router.callback_query(F.data.in_({"confirm_payment_yes", "confirm_payment_no"}))
-async def confirm_payment(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id == ADMIN_USER_ID:
-        await callback.answer("Админ не создаёт заказы.")
-        return
-
     data = await state.get_data()
-    if callback.data == "confirm_payment_no":
-        order_id = await create_order(
-            user_id=callback.from_user.id,
-            title=data["title"],
-            tz=data.get("tz", ""),
-            description=data["description"],
-            tags=data["tags"],
-            price=data["price"],
-            payment_method=data["payment_method"]
-        )
-        await set_last_order_time(callback.from_user.id, time.time())
-        await state.clear()
-        await callback.message.answer(
-            f"Заказ #{order_id} сохранён в статусе «ожидает оплаты».\n"
-            f"Когда оплатите — напишите: /pay_order {order_id}"
-        )
-        await callback.answer()
-        return
-
     order_id = await create_order(
         user_id=callback.from_user.id,
         title=data["title"],
@@ -382,26 +338,64 @@ async def confirm_payment(callback: CallbackQuery, state: FSMContext):
         description=data["description"],
         tags=data["tags"],
         price=data["price"],
-        payment_method=data["payment_method"]
+        payment_method=method
     )
-    await update_order(order_id, status="pending")
     await set_last_order_time(callback.from_user.id, time.time())
     await state.clear()
 
-    order = await get_order(order_id)
+    if method == "наличные":
+        # Для наличных — сразу отправляем админу, так как оплата "в момент передачи"
+        await update_order(order_id, status="pending")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Взять", callback_data=f"take_{order_id}")],
+            [InlineKeyboardButton(text="🗑 Игнорировать", callback_data=f"ignore_{order_id}")]
+        ])
+        await safe_send_message(
+            ADMIN_USER_ID,
+            f"🆕 Новый заказ!\n{format_order_message(await get_order(order_id), for_admin=True)}",
+            reply_markup=kb
+        )
+        await callback.message.answer(f"✅ Заказ #{order_id} отправлен админу!")
+    else:
+        # Для карты — ждём подтверждения оплаты
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Оплатил", callback_data=f"paid_{order_id}")],
+            [InlineKeyboardButton(text="❌ Не оплатил", callback_data=f"not_paid_{order_id}")]
+        ])
+        await callback.message.answer("Оплатили?", reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("paid_"))
+async def handle_paid(callback: CallbackQuery):
+    if callback.from_user.id == ADMIN_USER_ID:
+        await callback.answer()
+        return
+    order_id = int(callback.data.split("_")[1])
+    await update_order(order_id, status="pending")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Взять", callback_data=f"take_{order_id}")],
         [InlineKeyboardButton(text="🗑 Игнорировать", callback_data=f"ignore_{order_id}")]
     ])
     await safe_send_message(
         ADMIN_USER_ID,
-        f"🆕 Новый заказ!\n{format_order_message(order, for_admin=True)}",
+        f"🆕 Новый заказ!\n{format_order_message(await get_order(order_id), for_admin=True)}",
         reply_markup=kb
     )
     await callback.message.answer(f"✅ Заказ #{order_id} отправлен админу!")
     await callback.answer()
 
-# === Оплата позже ===
+@router.callback_query(F.data.startswith("not_paid_"))
+async def handle_not_paid(callback: CallbackQuery):
+    if callback.from_user.id == ADMIN_USER_ID:
+        await callback.answer()
+        return
+    order_id = int(callback.data.split("_")[1])
+    await callback.message.answer(
+        f"Заказ #{order_id} сохранён в статусе «ожидает оплаты».\n"
+        f"Когда оплатите — напишите: /pay_order {order_id}"
+    )
+    await callback.answer()
+
 @router.message(Command("pay_order"))
 async def pay_order_later(message: Message):
     parts = message.text.split()
@@ -420,6 +414,9 @@ async def pay_order_later(message: Message):
         return
     if order["status"] != "awaiting_payment":
         await message.answer("Этот заказ уже обработан.")
+        return
+    if order["payment_method"] != "карта":
+        await message.answer("Этот заказ не требует онлайн-оплаты.")
         return
 
     await update_order(order_id, status="pending")
