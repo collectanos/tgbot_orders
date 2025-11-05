@@ -15,7 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramAPIError
 from dotenv import load_dotenv
 
-# === АВТОУСТАНОВКА aiosqlite (как вы просили) ===
+# === Автоустановка aiosqlite ===
 try:
     import aiosqlite
 except ImportError:
@@ -108,7 +108,7 @@ async def init_db():
         """)
         await db.commit()
 
-# --- Скидки и промокоды ---
+# --- Функции скидок и промокодов ---
 async def get_global_discount():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT discount_value, discount_type FROM global_discount WHERE id = 1") as cursor:
@@ -409,8 +409,8 @@ async def process_price(message: Message, state: FSMContext):
     await state.set_state(CreateOrder.waiting_for_payment_method)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("💵 Наличные", callback_data="pay_cash")],
-        [InlineKeyboardButton("💳 Карта (СБП ВТБ)", callback_data="pay_card")]
+        [InlineKeyboardButton(text="💵 Наличные", callback_data="pay_cash")],
+        [InlineKeyboardButton(text="💳 Карта (СБП ВТБ)", callback_data="pay_card")]
     ])
     await message.answer("Выберите способ оплаты:", reply_markup=kb)
 
@@ -430,8 +430,8 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
         )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("✅ Оплатил", callback_data="payment_yes")],
-        [InlineKeyboardButton("❌ Ещё не оплатил", callback_data="payment_no")]
+        [InlineKeyboardButton(text="✅ Оплатил", callback_data="payment_yes")],
+        [InlineKeyboardButton(text="❌ Ещё не оплатил", callback_data="payment_no")]
     ])
     await callback.message.answer("Вы уже оплатили?", reply_markup=kb)
     await state.set_state(CreateOrder.waiting_for_payment_confirmation)
@@ -467,8 +467,8 @@ async def process_payment_confirmation(callback: CallbackQuery, state: FSMContex
         payment_info += "\n❗ Админ: проверьте поступление по СБП."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("📥 Взять", callback_data=f"take_{order_id}")],
-        [InlineKeyboardButton("🗑 Игнорировать", callback_data=f"ignore_{order_id}")]
+        [InlineKeyboardButton(text="📥 Взять", callback_data=f"take_{order_id}")],
+        [InlineKeyboardButton(text="🗑 Игнорировать", callback_data=f"ignore_{order_id}")]
     ])
 
     await safe_send_message(
@@ -588,8 +588,8 @@ async def discount_start(message: Message, state: FSMContext):
         return
     await state.set_state(AdminFSM.discount_type)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("Проценты (%)", callback_data="disc_type_percent")],
-        [InlineKeyboardButton("Рубли (₽)", callback_data="disc_type_fixed")]
+        [InlineKeyboardButton(text="Проценты (%)", callback_data="disc_type_percent")],
+        [InlineKeyboardButton(text="Рубли (₽)", callback_data="disc_type_fixed")]
     ])
     await message.answer("Тип скидки:", reply_markup=kb)
 
@@ -647,8 +647,8 @@ async def promo_code_entered(message: Message, state: FSMContext):
     await state.update_data(code=code)
     await state.set_state(AdminFSM.promo_type)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("Проценты (%)", callback_data="promo_type_percent")],
-        [InlineKeyboardButton("Рубли (₽)", callback_data="promo_type_fixed")]
+        [InlineKeyboardButton(text="Проценты (%)", callback_data="promo_type_percent")],
+        [InlineKeyboardButton(text="Рубли (₽)", callback_data="promo_type_fixed")]
     ])
     await message.answer("Тип скидки:", reply_markup=kb)
 
@@ -750,7 +750,7 @@ async def user_apply_promo(message: Message):
     disc = f"{promo['discount_value']}%" if promo['discount_type'] == 'percent' else f"{promo['discount_value']} ₽"
     await message.answer(f"✅ Промокод `{code}` применён! Скидка: {disc}.", parse_mode="Markdown")
 
-# === Админ: заказы (без изменений) ===
+# === Админ: заказы ===
 @router.callback_query(F.data.startswith("take_"))
 async def admin_take(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_USER_ID: return
@@ -762,10 +762,10 @@ async def admin_take(callback: CallbackQuery):
     await update_order(order_id, status="in_progress")
     await safe_send_message(order["user_id"], f"✅ Заказ #{order_id} взят в работу!")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("💬 Цена", callback_data=f"change_price_{order_id}")],
-        [InlineKeyboardButton("✏️ Коммент", callback_data=f"comment_{order_id}")],
-        [InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_id}")],
-        [InlineKeyboardButton("🗑 Удалить", callback_data=f"admin_del_{order_id}")]
+        [InlineKeyboardButton(text="💬 Цена", callback_data=f"change_price_{order_id}")],
+        [InlineKeyboardButton(text="✏️ Коммент", callback_data=f"comment_{order_id}")],
+        [InlineKeyboardButton(text="✅ Завершить", callback_data=f"complete_{order_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_del_{order_id}")]
     ])
     await callback.message.edit_text(
         f"{format_order_message(order, for_admin=True)}\n🛠 Взят в работу.",
@@ -804,8 +804,8 @@ async def handle_admin_input(message: Message, state: FSMContext):
         order_id = data["order_id"]
         await update_order(order_id, admin_proposed_price=price, status="price_proposed")
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton("✅ Принять", callback_data=f"accept_price_{order_id}")],
-            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_price_{order_id}")]
+            [InlineKeyboardButton(text="✅ Принять", callback_data=f"accept_price_{order_id}")],
+            [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_price_{order_id}")]
         ])
         await safe_send_message(
             (await get_order(order_id))["user_id"],
@@ -864,8 +864,8 @@ async def complete_order(callback: CallbackQuery):
     order = await get_order(order_id)
     final_price = order["admin_proposed_price"] or order["client_price"]
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(f"✅ Да, +{final_price:.2f} ₽", callback_data=f"confirm_earn_{order_id}")],
-        [InlineKeyboardButton("❌ Нет", callback_data=f"skip_earn_{order_id}")]
+        [InlineKeyboardButton(text=f"✅ Да, +{final_price:.2f} ₽", callback_data=f"confirm_earn_{order_id}")],
+        [InlineKeyboardButton(text="❌ Нет", callback_data=f"skip_earn_{order_id}")]
     ])
     await callback.message.edit_text(
         f"Заказ #{order_id} завершён.\nЗаписать {final_price:.2f} ₽ в заработок?",
@@ -882,11 +882,11 @@ async def confirm_earning(callback: CallbackQuery):
     final_price = order["admin_proposed_price"] or order["client_price"]
     await callback.message.edit_text(f"✅ {final_price:.2f} ₽ записано в заработок.")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("🕒 3 ч", callback_data=f"keep_3_{order_id}")],
-        [InlineKeyboardButton("🕕 6 ч", callback_data=f"keep_6_{order_id}")],
-        [InlineKeyboardButton("🕛 12 ч", callback_data=f"keep_12_{order_id}")],
-        [InlineKeyboardButton("📆 24 ч", callback_data=f"keep_24_{order_id}")],
-        [InlineKeyboardButton("🗑 Сейчас", callback_data=f"del_now_{order_id}")]
+        [InlineKeyboardButton(text="🕒 3 ч", callback_data=f"keep_3_{order_id}")],
+        [InlineKeyboardButton(text="🕕 6 ч", callback_data=f"keep_6_{order_id}")],
+        [InlineKeyboardButton(text="🕛 12 ч", callback_data=f"keep_12_{order_id}")],
+        [InlineKeyboardButton(text="📆 24 ч", callback_data=f"keep_24_{order_id}")],
+        [InlineKeyboardButton(text="🗑 Сейчас", callback_data=f"del_now_{order_id}")]
     ])
     await callback.message.answer("Сохранить заказ на:", reply_markup=kb)
     await callback.answer()
@@ -897,11 +897,11 @@ async def skip_earning(callback: CallbackQuery):
     order_id = int(callback.data.split("_")[2])
     await callback.message.edit_text("❌ Сумма НЕ записана в заработок.")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("🕒 3 ч", callback_data=f"keep_3_{order_id}")],
-        [InlineKeyboardButton("🕕 6 ч", callback_data=f"keep_6_{order_id}")],
-        [InlineKeyboardButton("🕛 12 ч", callback_data=f"keep_12_{order_id}")],
-        [InlineKeyboardButton("📆 24 ч", callback_data=f"keep_24_{order_id}")],
-        [InlineKeyboardButton("🗑 Сейчас", callback_data=f"del_now_{order_id}")]
+        [InlineKeyboardButton(text="🕒 3 ч", callback_data=f"keep_3_{order_id}")],
+        [InlineKeyboardButton(text="🕕 6 ч", callback_data=f"keep_6_{order_id}")],
+        [InlineKeyboardButton(text="🕛 12 ч", callback_data=f"keep_12_{order_id}")],
+        [InlineKeyboardButton(text="📆 24 ч", callback_data=f"keep_24_{order_id}")],
+        [InlineKeyboardButton(text="🗑 Сейчас", callback_data=f"del_now_{order_id}")]
     ])
     await callback.message.answer("Сохранить заказ на:", reply_markup=kb)
     await callback.answer()
@@ -941,3 +941,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+ 
