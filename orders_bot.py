@@ -14,6 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramAPIError
 from dotenv import load_dotenv
 import aiosqlite
+from datetime import datetime
 
 # === Настройка ===
 load_dotenv()
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 DB_PATH = "orders.db"
+START_TIME = time.time()
 if not BOT_TOKEN or not ADMIN_USER_ID:
     raise ValueError("Укажите BOT_TOKEN и ADMIN_USER_ID в файле .env")
 
@@ -33,6 +35,7 @@ dp.include_router(router)
 
 # === FSM ===
 class CreateOrder(StatesGroup):
+    waiting_for_agreement = State()
     waiting_for_title = State()
     waiting_for_tz_choice = State()
     waiting_for_tz = State()
@@ -40,6 +43,15 @@ class CreateOrder(StatesGroup):
     waiting_for_tags = State()
     waiting_for_price = State()
     waiting_for_payment_method = State()
+
+class AdminFSM(StatesGroup):
+    broadcast_text = State()
+    discount_type = State()
+    discount_value = State()
+    promo_code = State()
+    promo_type = State()
+    promo_value = State()
+    promo_uses = State()
 
 # === База данных ===
 async def init_db():
@@ -69,8 +81,113 @@ async def init_db():
                 last_order_time REAL NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS global_discount (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                discount_value REAL,
+                discount_type TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                discount_value REAL NOT NULL,
+                discount_type TEXT NOT NULL,
+                max_uses INTEGER NOT NULL DEFAULT 1,
+                current_uses INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_promo_attempts (
+                user_id INTEGER PRIMARY KEY,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                locked_until REAL
+            )
+        """)
         await db.commit()
 
+# --- Скидки и промокоды ---
+async def get_global_discount():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT discount_value, discount_type FROM global_discount WHERE id = 1") as cursor:
+            row = await cursor.fetchone()
+            return {"value": row[0], "type": row[1]} if row else None
+
+async def set_global_discount(value: float, disc_type: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO global_discount (id, discount_value, discount_type) VALUES (1, ?, ?)",
+            (value, disc_type)
+        )
+        await db.commit()
+
+async def remove_global_discount():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM global_discount WHERE id = 1")
+        await db.commit()
+
+async def create_promo_code(code: str, value: float, disc_type: str, max_uses: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO promo_codes (code, discount_value, discount_type, max_uses) VALUES (?, ?, ?, ?)",
+            (code.upper(), value, disc_type, max_uses)
+        )
+        await db.commit()
+
+async def get_promo_code(code: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM promo_codes WHERE code = ?", (code.upper(),)) as cursor:
+            return await cursor.fetchone()
+
+async def use_promo_code(code: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = ? AND current_uses < max_uses",
+            (code.upper(),)
+        )
+        await db.commit()
+
+async def delete_promo_code(code: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM promo_codes WHERE code = ?", (code.upper(),))
+        await db.commit()
+
+async def is_user_blocked_from_promo(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT locked_until FROM user_promo_attempts WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0] > time.time():
+                return True
+            return False
+
+async def record_failed_promo_attempt(user_id: int):
+    now = time.time()
+    unlock_time = now + 15 * 60
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO user_promo_attempts (user_id, failed_attempts, locked_until)
+            VALUES (?, 1, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                failed_attempts = failed_attempts + 1,
+                locked_until = CASE
+                    WHEN failed_attempts + 1 >= 3 THEN ?
+                    ELSE locked_until
+                END
+            """,
+            (user_id, unlock_time, unlock_time)
+        )
+        await db.commit()
+
+async def reset_promo_attempts(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM user_promo_attempts WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+# --- Основные функции ---
 async def get_last_order_time(user_id: int) -> Optional[float]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -113,6 +230,13 @@ async def get_user_orders(user_id: int):
             "SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
         ) as cursor:
             return await cursor.fetchall()
+
+async def get_orders_today() -> int:
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM orders WHERE created_at >= ?", (today,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
 
 async def update_order(order_id: int, **kwargs):
     if not kwargs:
@@ -199,6 +323,18 @@ def format_order_message(order, for_admin=False) -> str:
         text += f"Комментарий: {order['admin_comment']}\n"
     return text
 
+def format_time_ago(timestamp: float) -> str:
+    delta = time.time() - timestamp
+    if delta < 60:
+        return f"{int(delta)} с назад"
+    elif delta < 3600:
+        return f"{int(delta // 60)} мин назад"
+    elif delta < 86400:
+        return f"{int(delta // 3600)} ч назад"
+    else:
+        dt = datetime.fromtimestamp(timestamp)
+        return dt.strftime("%d.%m %H:%M")
+
 async def safe_send_message(chat_id: int, text: str, **kwargs):
     try:
         await bot.send_message(chat_id, text, **kwargs)
@@ -216,13 +352,35 @@ def create_deletion_task(order_id: int, delay: int):
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
+# === Соглашение ===
+AGREEMENT_TEXT = (
+    "📌 Перед созданием заказа вы (Заказчик) подтверждаете, что прочитали, поняли и безоговорочно принимаете следующие условия:\n\n"
+    "1. Вы несёте полную ответственность за содержание, формулировку и законность заказа.\n\n"
+    "2. Заказ не должен нарушать законодательство Российской Федерации, а также законодательство страны вашего проживания. "
+    "В случае нарушения — вся юридическая, финансовая и иная ответственность возлагается исключительно на вас.\n\n"
+    "3. Вы обязуетесь оплатить услугу/товар после подтверждения исполнителем готовности к выполнению заказа.\n\n"
+    "4. Отмена заказа после начала работы возможна только по письменному согласованию с Исполнителем и не гарантирует возврат средств.\n\n"
+    "5. Вы соглашаетесь, что Исполнитель вправе:\n"
+    "   • отказать в выполнении заказа без объяснения причин (например, при некорректном оформлении, сомнениях в законности или неясной формулировке);\n"
+    "   • предложить любую услугу или товар по своему усмотрению — если это не нарушает его прав;\n"
+    "   • устанавливать любую цену на услугу/товар (в т.ч. индивидуально), в том числе изменять её до подтверждения заказа.\n\n"
+    "6. Вы обязуетесь НЕ:\n"
+    "   • разглашать третьим лицам информацию о содержании, стоимости или факте приобретения услуги/товара без предварительного письменного разрешения Исполнителя;\n"
+    "   • распространять, публиковать, перепродавать, модифицировать или иным образом использовать полученный товар/услугу (включая результаты работы), если иное прямо не согласовано с Исполнителем.\n\n"
+    
+    "✅ Принимаете условия?"
+)
+
 # === Команды ===
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     if message.from_user.id == ADMIN_USER_ID:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💼 Заработок", callback_data="menu_adminstats")],
-            [InlineKeyboardButton(text="📥 Мои заказы", callback_data="menu_adminorders")],
+            [InlineKeyboardButton(text="📥 Все заказы", callback_data="menu_adminorders")],
+            [InlineKeyboardButton(text="📢 Рассылка", callback_data="menu_broadcast")],
+            [InlineKeyboardButton(text="🎟 Промокоды", callback_data="menu_promo")],
+            [InlineKeyboardButton(text="📊 Статус", callback_data="menu_status")],
         ])
         await message.answer("👋 Админ-меню:", reply_markup=kb)
     else:
@@ -230,13 +388,19 @@ async def cmd_start(message: Message):
             [InlineKeyboardButton(text="🆕 Создать заказ", callback_data="menu_neworder")],
             [InlineKeyboardButton(text="📋 Мои заказы", callback_data="menu_myorders")],
             [InlineKeyboardButton(text="💰 Мои траты", callback_data="menu_mystats")],
+            [InlineKeyboardButton(text="📄 Соглашение", callback_data="menu_agreement")],
         ])
         await message.answer("👋 Меню:", reply_markup=kb)
 
 # === Меню обработчики ===
 @router.callback_query(F.data == "menu_neworder")
 async def menu_neworder(callback: CallbackQuery, state: FSMContext):
-    await new_order_start(callback.message, state)
+    await state.set_state(CreateOrder.waiting_for_agreement)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Принимаю", callback_data="agree_yes")],
+        [InlineKeyboardButton(text="❌ Отказываюсь", callback_data="agree_no")]
+    ])
+    await callback.message.answer(AGREEMENT_TEXT, reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "menu_myorders")
@@ -254,24 +418,99 @@ async def menu_adminstats(callback: CallbackQuery):
     await admin_stats(callback.message)
     await callback.answer()
 
+@router.callback_query(F.data == "menu_agreement")
+async def menu_agreement(callback: CallbackQuery):
+    await callback.message.answer(AGREEMENT_TEXT)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_status")
+async def menu_status(callback: CallbackQuery):
+    uptime = time.time() - START_TIME
+    days = int(uptime // 86400)
+    hours = int((uptime % 86400) // 3600)
+    orders_today = await get_orders_today()
+    text = (
+        f"📊 Статус бота:\n"
+        f"⏱ Работает: {days} дн {hours} ч\n"
+        f"📥 Заказов сегодня: {orders_today}\n"
+        f"💬 Версия: 2.1"
+    )
+    await callback.message.answer(text)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_broadcast")
+async def menu_broadcast(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_USER_ID:
+        return
+    await state.set_state(AdminFSM.broadcast_text)
+    await callback.message.answer("Введите текст рассылки:")
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_promo")
+async def menu_promo(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_USER_ID:
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🆕 Создать", callback_data="promo_create")],
+        [InlineKeyboardButton(text="📋 Список", callback_data="promo_list")],
+    ])
+    await callback.message.answer("Промокоды:", reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data == "promo_create")
+async def promo_create_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_USER_ID:
+        return
+    await state.set_state(AdminFSM.promo_code)
+    await callback.message.answer("Название промокода:")
+    await callback.answer()
+
+@router.callback_query(F.data == "promo_list")
+async def promo_list(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_USER_ID:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM promo_codes") as cursor:
+            promos = await cursor.fetchall()
+    if not promos:
+        await callback.message.answer("Нет промокодов.")
+        return
+    text = "Промокоды:\n"
+    for p in promos:
+        disc = f"{p['discount_value']}%" if p['discount_type'] == 'percent' else f"{p['discount_value']} ₽"
+        text += f"`{p['code']}` — {disc}, {p['current_uses']}/{p['max_uses']}\n"
+    await callback.message.answer(text, parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data.in_({"agree_yes", "agree_no"}))
+async def handle_agreement(callback: CallbackQuery, state: FSMContext):
+    if callback.data == "agree_no":
+        await callback.message.answer("Создание заказа отменено.")
+        await state.clear()
+        await callback.answer()
+        return
+    await state.set_state(CreateOrder.waiting_for_title)
+    await callback.message.answer("Название заказа:")
+    await callback.answer()
+
 @router.callback_query(F.data == "menu_adminorders")
 async def menu_adminorders(callback: CallbackQuery):
-    # Показ всех заказов админу
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 20") as cursor:
             orders = await cursor.fetchall()
     if not orders:
         await callback.message.answer("Нет заказов.")
-    else:
-        text = "Все заказы:\n"
-        for o in orders:
-            status_icon = {
-                "pending": "⏳", "in_progress": "🛠", "completed": "✅", "cancelled": "❌", "awaiting_payment": "💳"
-            }.get(o["status"], "❓")
-            title = (o['title'][:25] + "...") if len(o['title']) > 25 else o['title']
-            text += f"{status_icon} #{o['id']} — {title} (ID: {o['user_id']})\n"
-        await callback.message.answer(text)
+        return
+    text = "Все заказы:\n"
+    for o in orders:
+        status_icon = {
+            "pending": "⏳", "in_progress": "🛠", "completed": "✅", "cancelled": "❌", "awaiting_payment": "💳"
+        }.get(o["status"], "❓")
+        title = (o['title'][:25] + "...") if len(o['title']) > 25 else o['title']
+        text += f"{status_icon} #{o['id']} — {title} (ID: {o['user_id']})\n"
+    await callback.message.answer(text)
     await callback.answer()
 
 @router.message(Command("cancel"))
@@ -284,14 +523,12 @@ async def new_order_start(message: Message, state: FSMContext):
     if message.from_user.id == ADMIN_USER_ID:
         await message.answer("Админ не создаёт заказы.")
         return
-    last_time = await get_last_order_time(message.from_user.id)
-    now = time.time()
-    if last_time and (now - last_time) < 300:
-        remaining = int(300 - (now - last_time))
-        await message.answer(f"⏳ Подождите {remaining} секунд.")
-        return
-    await state.set_state(CreateOrder.waiting_for_title)
-    await message.answer("Название заказа:")
+    await state.set_state(CreateOrder.waiting_for_agreement)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Принимаю", callback_data="agree_yes")],
+        [InlineKeyboardButton(text="❌ Отказываюсь", callback_data="agree_no")]
+    ])
+    await message.answer(AGREEMENT_TEXT, reply_markup=kb)
 
 @router.message(CreateOrder.waiting_for_title)
 async def process_title(message: Message, state: FSMContext):
@@ -462,26 +699,132 @@ async def pay_order_later(message: Message):
     )
     await message.answer(f"✅ Заказ #{order_id} отправлен админу!")
 
+# === Рассылка ===
+@router.message(AdminFSM.broadcast_text)
+async def handle_broadcast(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT DISTINCT user_id FROM orders") as cursor:
+            users = [row[0] for row in await cursor.fetchall()]
+    success = 0
+    for uid in users:
+        if uid == ADMIN_USER_ID:
+            continue
+        try:
+            await bot.send_message(uid, f"📢 Рассылка:\n\n{message.text}")
+            success += 1
+        except:
+            pass
+    await message.answer(f"✅ Рассылка отправлена {success} пользователям.")
+    await state.clear()
+
+# === Промокоды ===
+@router.message(AdminFSM.promo_code)
+async def promo_code_entered(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    code = message.text.strip().upper()
+    if not code.replace("_", "").replace("-", "").isalnum():
+        await message.answer("Только буквы, цифры, _ или -")
+        return
+    await state.update_data(code=code)
+    await state.set_state(AdminFSM.promo_type)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Проценты (%)", callback_data="promo_type_percent")],
+        [InlineKeyboardButton(text="Рубли (₽)", callback_data="promo_type_fixed")]
+    ])
+    await message.answer("Тип скидки:", reply_markup=kb)
+
+@router.callback_query(F.data.in_({"promo_type_percent", "promo_type_fixed"}))
+async def promo_type_selected(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_USER_ID:
+        return
+    ptype = "percent" if callback.data == "promo_type_percent" else "fixed"
+    await state.update_data(promo_type=ptype)
+    await state.set_state(AdminFSM.promo_value)
+    text = "Размер скидки в %:" if ptype == "percent" else "Сумма в ₽:"
+    await callback.message.answer(text)
+    await callback.answer()
+
+@router.message(AdminFSM.promo_value)
+async def promo_value_entered(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    try:
+        value = float(message.text)
+        if value <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Положительное число.")
+        return
+    await state.update_data(promo_value=value)
+    await state.set_state(AdminFSM.promo_uses)
+    await message.answer("Макс. число применений:")
+
+@router.message(AdminFSM.promo_uses)
+async def promo_uses_entered(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    try:
+        uses = int(message.text)
+        if uses <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Целое число > 0.")
+        return
+    data = await state.get_data()
+    await create_promo_code(data["code"], data["promo_value"], data["promo_type"], uses)
+    disc = f"{data['promo_value']}%" if data["promo_type"] == "percent" else f"{data['promo_value']} ₽"
+    await message.answer(f"✅ Промокод `{data['code']}` создан!\nСкидка: {disc}\nЛимит: {uses}")
+    await state.clear()
+
+@router.message(Command("promo"))
+async def user_apply_promo(message: Message):
+    if message.from_user.id == ADMIN_USER_ID:
+        await message.answer("Админ не использует промокоды.")
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Использование: /promo КОД")
+        return
+    code = parts[1].strip().upper()
+    if await is_user_blocked_from_promo(message.from_user.id):
+        await message.answer("Вы заблокированы на 15 минут из-за частых ошибок.")
+        return
+    promo = await get_promo_code(code)
+    if not promo:
+        await record_failed_promo_attempt(message.from_user.id)
+        await message.answer("❌ Неверный промокод.")
+        return
+    if promo["current_uses"] >= promo["max_uses"]:
+        await message.answer("❌ Промокод исчерпан.")
+        return
+    await use_promo_code(code)
+    await reset_promo_attempts(message.from_user.id)
+    disc = f"{promo['discount_value']}%" if promo['discount_type'] == 'percent' else f"{promo['discount_value']} ₽"
+    await message.answer(f"✅ Промокод `{code}` применён! Скидка: {disc}.", parse_mode="Markdown")
+
+# === Основные команды (без изменений, но с text=) ===
 @router.message(Command("myorders"))
 async def my_orders(message: Message):
-    if message.from_user.id == ADMIN_USER_ID:
-        await message.answer("Админ: смотрите уведомления.")
-        return
     orders_list = await get_user_orders(message.from_user.id)
     if not orders_list:
         await message.answer("У вас нет заказов.")
         return
-    text = "Ваши заказы:\n"
+    text = "📋 Ваши заказы:\n"
     for o in orders_list:
-        status_icon = {"pending":"⏳", "in_progress":"🛠", "completed":"✅", "cancelled":"❌", "awaiting_payment":"💳"}.get(o["status"], "❓")
-        text += f"{status_icon} #{o['id']} — {o['title']}\n"
+        status_icon = {
+            "pending": "⏳", "in_progress": "🛠", "completed": "✅",
+            "cancelled": "❌", "awaiting_payment": "💳"
+        }.get(o["status"], "❓")
+        time_str = format_time_ago(o["created_at"])
+        title = (o['title'][:30] + "...") if len(o['title']) > 30 else o['title']
+        text += f"{status_icon} #{o['id']} — {title} ({time_str})\n"
     await message.answer(text)
 
 @router.message(Command("mystats"))
 async def my_stats(message: Message):
-    if message.from_user.id == ADMIN_USER_ID:
-        await message.answer("Админ: используйте /adminstats")
-        return
     total = await get_user_total_spent(message.from_user.id)
     await message.answer(f"💰 Всего потрачено: {total:.2f} ₽")
 
@@ -492,7 +835,23 @@ async def admin_stats(message: Message):
     total = await get_admin_total_earned()
     await message.answer(f"💼 Ваш заработок: {total:.2f} ₽")
 
-# === Админ-обработчики (ОРИГИНАЛ ПОЛНОСТЬЮ СОХРАНЁН) ===
+@router.message(Command("status"))
+async def status_cmd(message: Message):
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    uptime = time.time() - START_TIME
+    days = int(uptime // 86400)
+    hours = int((uptime % 86400) // 3600)
+    orders_today = await get_orders_today()
+    text = (
+        f"📊 Статус бота:\n"
+        f"⏱ Работает: {days} дн {hours} ч\n"
+        f"📥 Заказов сегодня: {orders_today}\n"
+        f"💬 Версия: 2.1"
+    )
+    await message.answer(text)
+
+# === Админ-обработчики (все с text=) ===
 @router.callback_query(F.data.startswith("take_"))
 async def admin_take(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_USER_ID: return
@@ -527,6 +886,7 @@ async def admin_ignore(callback: CallbackQuery):
     await callback.message.edit_text("🗑 Игнорировано.")
     await callback.answer()
 
+# --- Остальные обработчики (change_price, comment, complete и т.д. — с text=) ---
 @router.callback_query(F.data.startswith("change_price_"))
 async def start_change_price(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_USER_ID: return
@@ -682,7 +1042,7 @@ async def admin_del(callback: CallbackQuery):
 # === Запуск ===
 async def main():
     await init_db()
-    logger.info("Бот запущен с ТЗ, оплатой, кнопками и лимитом 1 млрд ₽.")
+    logger.info("Бот запущен с соглашением, ТЗ, оплатой, промокодами и рассылкой.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
