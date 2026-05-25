@@ -65,7 +65,6 @@ class AdminFSM(StatesGroup):
     change_price = State()
     admin_comment = State()
     edit_order_title = State()
-    # ✅ НОВОЕ: Состояния для удаления промокода
     waiting_for_promo_delete_code = State()
     waiting_for_promo_delete_confirm = State()
 
@@ -426,10 +425,10 @@ def create_deletion_task(order_id: int, delay: int):
 
 # === Соглашение ===
 AGREEMENT_TEXT = (
-    "📌 Перед созданием заказа вы (Заказчик) подтверждаете, что прочитали, поняли и безоговорочно принимаете следующие условия:\n"
+    "📌 Перед созданием заказа Вы (Заказчик) подтверждаете, что прочитали, поняли и безоговорочно принимаете следующие условия:\n"
     "1. Вы несёте полную ответственность за содержание, формулировку и законность заказа.\n"
-    "2. Заказ не должен нарушать законодательство Российской Федерации, а также законодательство страны вашего проживания. "
-    "В случае нарушения — вся юридическая, финансовая и иная ответственность возлагается исключительно на вас.\n"
+    "2. Заказ не должен нарушать законодательство Российской Федерации, а также законодательство страны Вашего проживания. "
+    "В случае нарушения — вся юридическая, финансовая и иная ответственность возлагается исключительно на Вас.\n"
     "3. Вы обязуетесь оплатить услугу/товар после подтверждения исполнителем готовности к выполнению заказа.\n"
     "4. Отмена заказа после начала работы возможна только по письменному согласованию с Исполнителем и не гарантирует возврат средств.\n"
     "5. Вы соглашаетесь, что Исполнитель вправе:\n"
@@ -494,7 +493,7 @@ async def menu_myorders(callback: CallbackQuery, page: int = 0):
     total_count = await get_user_orders_count(user_id)
     
     if not orders_list:
-        await callback.message.answer("📭 У вас пока нет заказов.")
+        await callback.message.answer("📭 У Вас пока нет заказов.")
         await callback.answer()
         return
 
@@ -551,7 +550,7 @@ async def view_order_details(callback: CallbackQuery):
     
     order = await get_order(order_id)
     if not order or order["user_id"] != user_id:
-        await callback.answer("❌ Заказ не найден или не ваш.", show_alert=True)
+        await callback.answer("❌ Заказ не найден или не Ваш.", show_alert=True)
         return
     
     text = format_order_message(order)
@@ -580,7 +579,7 @@ async def start_edit_order(callback: CallbackQuery, state: FSMContext):
     
     order = await get_order(order_id)
     if not order or order["user_id"] != user_id:
-        await callback.answer("❌ Заказ не найден или не ваш.", show_alert=True)
+        await callback.answer("❌ Заказ не найден или не Ваш.", show_alert=True)
         return
     
     if order["status"] not in ["pending", "awaiting_payment"]:
@@ -676,7 +675,7 @@ async def menu_status(callback: CallbackQuery):
         f"📊 Статус бота:\n"
         f"⏱ Работает: {days} дн {hours} ч\n"
         f"📥 Заказов сегодня: {orders_today}\n"
-        f"💬 Версия: 3.2 (Promo Delete)"
+        f"💬 Версия: 3.3 (Fixed Style)"
     )
     await callback.message.answer(text)
     await callback.answer()
@@ -695,7 +694,6 @@ async def menu_promo(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_USER_ID:
         await callback.answer("❌ Доступ запрещён", show_alert=True)
         return
-    # ✅ ДОБАВЛЕНА КНОПКА УДАЛЕНИЯ
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🆕 Создать", callback_data="promo_create")],
         [InlineKeyboardButton(text="📋 Список", callback_data="promo_list")],
@@ -731,14 +729,12 @@ async def promo_list(callback: CallbackQuery):
             disc = f"{p['discount_value']}%" if p['discount_type'] == 'percent' else f"{p['discount_value']} ₽"
             text += f"`{p['code']}` — {disc}, {p['current_uses']}/{p['max_uses']}\n"
         
-        # ✅ ДОБАВЛЕНА КНОПКА НАЗАД
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 В меню промокодов", callback_data="menu_promo")]
         ])
         await callback.message.answer(text, parse_mode="Markdown", reply_markup=kb)
         await callback.answer()
 
-# ✅ НОВОЕ: Начало процесса удаления промокода
 @router.callback_query(F.data == "promo_delete_start")
 async def promo_delete_start(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_USER_ID:
@@ -748,7 +744,6 @@ async def promo_delete_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите код промокода, который хотите удалить:")
     await callback.answer()
 
-# ✅ НОВОЕ: Ввод кода для удаления
 @router.message(AdminFSM.waiting_for_promo_delete_code)
 async def promo_delete_enter_code(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_USER_ID:
@@ -761,7 +756,6 @@ async def promo_delete_enter_code(message: Message, state: FSMContext):
         await message.answer("❌ Промокод не найден. Введите корректный код:")
         return
     
-    # ✅ ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ
     await state.update_data(delete_code=code)
     await state.set_state(AdminFSM.waiting_for_promo_delete_confirm)
     
@@ -779,7 +773,6 @@ async def promo_delete_enter_code(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# ✅ НОВОЕ: Подтверждение удаления
 @router.callback_query(F.data == "promo_confirm_del")
 async def promo_confirm_del(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_USER_ID:
@@ -797,13 +790,13 @@ async def promo_confirm_del(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-# ✅ НОВОЕ: Отмена удаления
 @router.callback_query(F.data == "promo_cancel_del")
 async def promo_cancel_del(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_USER_ID:
         await callback.answer("❌ Доступ запрещён", show_alert=True)
         return
     await state.clear()
+    # ✅ ИСПРАВЛЕНО: Теперь сообщение отправляется через callback.message
     await callback.message.answer("❌ Удаление отменено.")
     await callback.answer()
 
@@ -821,7 +814,7 @@ async def handle_agreement(callback: CallbackQuery, state: FSMContext):
         ])
         await callback.message.answer(
             "⚠️ Вы уверены?\nВ случае подтверждения отказа доступ к боту будет ограничен. "
-            "Для восстановления доступа вам потребуется обратиться к администратору.",
+            "Для восстановления доступа Вам потребуется обратиться к администратору.",
             reply_markup=kb
         )
         await callback.answer()
@@ -885,7 +878,7 @@ async def process_title(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="✅ Есть ТЗ", callback_data="tz_yes")],
         [InlineKeyboardButton(text="❌ Нет ТЗ", callback_data="tz_no")]
     ])
-    await message.answer("Есть ли у вас техническое задание (ТЗ)?", reply_markup=kb)
+    await message.answer("Есть ли у Вас техническое задание (ТЗ)?", reply_markup=kb)
 
 @router.callback_query(F.data.in_({"tz_yes", "tz_no"}))
 async def process_tz_choice(callback: CallbackQuery, state: FSMContext):
@@ -920,7 +913,8 @@ async def process_tags(message: Message, state: FSMContext):
     if await is_user_blocked(message.from_user.id): return
     await state.update_data(tags=message.text)
     await state.set_state(CreateOrder.waiting_for_price)
-    await message.answer("Цена в ₽:\n(указывается сколько ты готов оплатить за работу)")
+    # ✅ ИСПРАВЛЕНО: обращение на "Вы"
+    await message.answer("Цена в ₽:\n(указывается сколько Вы готовы оплатить за работу)")
 
 @router.message(CreateOrder.waiting_for_price)
 async def process_price(message: Message, state: FSMContext):
@@ -939,7 +933,7 @@ async def process_price(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="✅ Да, есть", callback_data="promo_yes")],
         [InlineKeyboardButton(text="❌ Нет", callback_data="promo_no")]
     ])
-    await message.answer("Есть ли у вас промокод?", reply_markup=kb)
+    await message.answer("Есть ли у Вас промокод?", reply_markup=kb)
 
 @router.callback_query(F.data.in_({"promo_yes", "promo_no"}))
 async def process_promo_choice(callback: CallbackQuery, state: FSMContext):
@@ -1025,7 +1019,7 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
     
     if callback.data == "pay_equivalent":
         await state.set_state(CreateOrder.waiting_for_equivalent_item)
-        await callback.message.answer("Что именно вы предлагаете взамен (название товара/услуги)?")
+        await callback.message.answer("Что именно Вы предлагаете взамен (название товара/услуги)?")
         await callback.answer()
         return
 
@@ -1296,7 +1290,7 @@ async def status_cmd(message: Message):
         f"📊 Статус бота:\n"
         f"⏱ Работает: {days} дн {hours} ч\n"
         f"📥 Заказов сегодня: {orders_today}\n"
-        f"💬 Версия: 3.2 (Promo Delete)"
+        f"💬 Версия: 3.3 (Fixed Style)"
     )
     await message.answer(text)
 
@@ -1417,7 +1411,7 @@ async def client_accept_price(callback: CallbackQuery):
     order_id = int(callback.data.split("_")[2])
     order = await get_order(order_id)
     if not order or order["user_id"] != callback.from_user.id:
-        await callback.answer("Не ваш заказ.", show_alert=True)
+        await callback.answer("Не Ваш заказ.", show_alert=True)
         return
     await update_order(order_id, admin_proposed_price=None, status="in_progress")
     await safe_edit_message(callback.message, "✅ Цена принята. Заказ в работе.")
@@ -1432,7 +1426,7 @@ async def client_reject_price(callback: CallbackQuery):
     order_id = int(callback.data.split("_")[2])
     order = await get_order(order_id)
     if not order or order["user_id"] != callback.from_user.id:
-        await callback.answer("Не ваш заказ.", show_alert=True)
+        await callback.answer("Не Ваш заказ.", show_alert=True)
         return
     await update_order(order_id, status="cancelled")
     await safe_edit_message(callback.message, "❌ Заказ отменён.")
@@ -1534,7 +1528,7 @@ async def admin_del(callback: CallbackQuery):
 # === Запуск ===
 async def main():
     await init_db()
-    logger.info("🚀 Бот запущен (Версия 3.2 - Promo Delete)")
+    logger.info("🚀 Бот запущен (Версия 3.3 - Fixed Style)")
     logger.info(f"👤 Admin ID: {ADMIN_USER_ID}")
     await dp.start_polling(bot)
 
