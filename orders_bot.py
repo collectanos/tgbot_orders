@@ -25,7 +25,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
+admin_id = os.getenv("ADMIN_USER_ID")
+if not admin_id:
+    raise ValueError("Укажите ADMIN_USER_ID в .env")
+ADMIN_USER_ID = int(admin_id)
 DB_PATH = "orders.db"
 START_TIME = time.time()
 ORDERS_PER_PAGE = 10
@@ -921,7 +924,7 @@ async def process_price(message: Message, state: FSMContext):
     if await is_user_blocked(message.from_user.id): return
     try:
         price = float(message.text)
-        if price < 0 or price > 1_000_000_000:
+        if price <= 0 or price > 1_000_000_000:
             raise ValueError
     except ValueError:
         await message.answer("Введите число от 0 до 1 000 000 000.")
@@ -1366,34 +1369,6 @@ async def start_comment(callback: CallbackQuery, state: FSMContext):
 async def handle_admin_change_price(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_USER_ID:
         return
-    try:
-        price = float(message.text)
-        if price < 0: 
-            raise ValueError
-    except ValueError:
-        await message.answer("Число ≥ 0.")
-        return
-    data = await state.get_data()
-    order_id = data["order_id"]
-    await update_order(order_id, admin_proposed_price=price, status="price_proposed")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Принять", callback_data=f"accept_price_{order_id}")],
-        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_price_{order_id}")]
-    ])
-    order = await get_order(order_id)
-    await safe_send_message(
-        order["user_id"],
-        f"💬 Предложена новая цена: {price:.2f} ₽. Принять?",
-        reply_markup=kb
-    )
-    await message.answer("Предложение отправлено.")
-    await state.clear()
-    await log_action(ADMIN_USER_ID, "change_price", f"Заказ #{order_id}, цена {price}")
-
-@router.message(AdminFSM.admin_comment)
-async def handle_admin_comment(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_USER_ID:
-        return
     data = await state.get_data()
     order_id = data["order_id"]
     await update_order(order_id, admin_comment=message.text)
@@ -1413,7 +1388,7 @@ async def client_accept_price(callback: CallbackQuery):
     if not order or order["user_id"] != callback.from_user.id:
         await callback.answer("Не Ваш заказ.", show_alert=True)
         return
-    await update_order(order_id, admin_proposed_price=None, status="in_progress")
+    await update_order(order_id, status="in_progress")
     await safe_edit_message(callback.message, "✅ Цена принята. Заказ в работе.")
     await safe_send_message(ADMIN_USER_ID, f"Клиент принял цену по заказу #{order_id}.")
     await callback.answer()
