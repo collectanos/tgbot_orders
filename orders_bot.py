@@ -1369,6 +1369,34 @@ async def start_comment(callback: CallbackQuery, state: FSMContext):
 async def handle_admin_change_price(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_USER_ID:
         return
+    try:
+        price = float(message.text)
+        if price < 0: 
+            raise ValueError
+    except ValueError:
+        await message.answer("Число ≥ 0.")
+        return
+    data = await state.get_data()
+    order_id = data["order_id"]
+    await update_order(order_id, admin_proposed_price=price, status="price_proposed")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Принять", callback_data=f"accept_price_{order_id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_price_{order_id}")]
+    ])
+    order = await get_order(order_id)
+    await safe_send_message(
+        order["user_id"],
+        f"💬 Предложена новая цена: {price:.2f} ₽. Принять?",
+        reply_markup=kb
+    )
+    await message.answer("Предложение отправлено.")
+    await state.clear()
+    await log_action(ADMIN_USER_ID, "change_price", f"Заказ #{order_id}, цена {price}")
+
+@router.message(AdminFSM.admin_comment)
+async def handle_admin_comment(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_USER_ID:
+        return
     data = await state.get_data()
     order_id = data["order_id"]
     await update_order(order_id, admin_comment=message.text)
